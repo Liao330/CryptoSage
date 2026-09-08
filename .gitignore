@@ -1,0 +1,40 @@
+# 环境变量（含密钥）
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+
+# SQLite 数据库
+*.db
+
+# Node
+node_modules/
+frontend/dist/
+frontend/tsconfig.tsbuildinfo
+
+# 后台服务运行时数据（PID/日志），由 start.sh start/restart 生成
+.run/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Demo 媒体文件（大文件不提交；docs/demos 下的成品放行，便于随仓库提交）
+*.mp4
+*.gif
+*.mov
+!docs/demos/*.mp4
+!docs/demos/*.gif
+!docs/demos/*.mov

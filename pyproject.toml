@@ -1,0 +1,27 @@
+[project]
+name = "cryptosage"
+version = "0.1.0"
+description = "CryptoSage — 加密货币市场分析多 Agent 系统，基于 Hy3 多档思考 + Function Calling"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "openai>=1.55.0,<2.0.0",
+    "langgraph>=0.2.0,<1.0.0",
+    "fastapi>=0.110.0,<1.0.0",
+    "uvicorn[standard]>=0.29.0,<1.0.0",
+    "httpx>=0.27.0,<1.0.0",
+    "socksio>=1.0.0,<2.0.0",
+    "pandas>=2.2.0,<3.0.0",
+    "python-dotenv>=1.0.0,<2.0.0",
+    "pydantic>=2.5.0,<3.0.0",
+    "numpy>=1.26.0,<2.0.0",
+    "aiosqlite>=0.20.0,<1.0.0",
+    "certifi>=2024.0.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.backends._legacy:_Backend"
