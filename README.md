@@ -28,6 +28,7 @@
 - [环境变量](#环境变量)
 - [合规与安全](#合规与安全)
 - [Demo](#demo)
+- [实战任务进度](#实战任务进度)
 - [参与方式说明](#参与方式说明)
 - [License](#license)
 
@@ -59,7 +60,7 @@
 | 完整结果表格 | [`docs/EVALUATION_RESULTS.md`](docs/EVALUATION_RESULTS.md) |
 | 有效性验证结果（判别力 / 一致性） | [`docs/VALIDATION.md`](docs/VALIDATION.md) |
 | 分析报告（场景理由 / 评估维度依据 / 失败模式 / 能力边界） | [`docs/ANALYSIS_REPORT.md`](docs/ANALYSIS_REPORT.md) |
-| ≤2 分钟 demo 视频 / GIF | [`docs/demos/`](docs/demos/README.md) |
+| ≤2 分钟 demo 视频 / GIF（中文硬字幕版） | [`docs/demos/`](docs/demos/README.md)（[带字幕版](docs/demos/CryptoSage_demo_sub.mp4)） |
 
 ---
 
@@ -308,10 +309,34 @@ docker run -p 8000:8000 --env-file .env cryptosage
 
 ## Demo
 
-见 [`docs/demos/README.md`](docs/demos/README.md)。至少覆盖两个端到端流程（建议 ≤2 分钟 GIF / 视频）：
+见 [`docs/demos/README.md`](docs/demos/README.md) 与入库视频：
+
+- **带字幕版（推荐）**：[`docs/demos/CryptoSage_demo_sub.mp4`](docs/demos/CryptoSage_demo_sub.mp4) — 中文硬字幕，覆盖完整多 Agent 研判全流程。
+
+覆盖的两个端到端流程：
 
 1. **完整多 Agent 研判**："分析 BTC 当前是否适合进场"——展示编排 → 专家并行 → 融合 → 对抗 → 最终报告；
 2. **事件驱动快速分析**："ETH 刚才突然大跌，发生了什么？"——展示衍生品 / 链上 / 宏观联动与新闻时效守卫。
+
+---
+
+## 实战任务进度
+
+> 任务归属：2026 犀牛鸟开源人才培养计划 · 实战任务《混元大语言模型项目》· 任务一（开放式场景：AI 应用与评判标准设计）。
+
+| 实战任务交付物 | 状态 | 仓库位置 |
+|---|---|---|
+| 开源项目仓库（应用源码 / README / 环境配置 / 运行说明） | ✅ 已完成 | 仓库根目录 + `backend/` + `frontend/` + `.env.example` |
+| 可运行的多 Agent 应用（编排 / 融合 / Critic / 校准） | ✅ 已完成 | `backend/agents/` + `backend/calibration/` |
+| 自定义评估方法（维度 + 判定标准） | ✅ 已完成 | [`docs/EVALUATION_METHOD.md`](docs/EVALUATION_METHOD.md) |
+| 评测样本集（含难例 / 反例） | ✅ 已完成 | [`evaluation/dataset/`](evaluation/dataset/) |
+| 评测脚本 | ✅ 已完成 | [`evaluation/scripts/`](evaluation/scripts/) |
+| 评测结果表格与归因 | 🟡 待按脚本回填 | [`docs/EVALUATION_RESULTS.md`](docs/EVALUATION_RESULTS.md) |
+| 有效性验证（判别力 / 一致性） | 🟡 待按脚本回填 | [`docs/VALIDATION.md`](docs/VALIDATION.md) |
+| 分析报告（场景 / 方案 / 失败模式 / 能力边界） | ✅ 已完成 | [`docs/ANALYSIS_REPORT.md`](docs/ANALYSIS_REPORT.md) |
+| **Demo 视频（≤2min，含中文硬字幕）** | ✅ **已完成（本次提交）** | [`docs/demos/CryptoSage_demo_sub.mp4`](docs/demos/CryptoSage_demo_sub.mp4) |
+
+> 说明：评测"结果表格 / 有效性验证"两项为运行时产出，需实际跑一轮评测脚本后按输出回填，当前为待回填占位，不作为断言性结论（见各文档内标注）。
 
 ---
 
