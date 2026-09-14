@@ -8,6 +8,7 @@ from backend.agents.state import AnalysisState
 from backend.agents.fc_base import run_function_calling
 from backend.data.sentiment_client import sentiment_client
 from backend.tools.definitions import SENTIMENT_TOOLS
+from backend.utils.asof import parse_as_of_ms
 from backend.utils.json_utils import parse_signal
 
 logger = logging.getLogger(__name__)
@@ -40,15 +41,24 @@ async def run_sentiment_agent(state: AnalysisState) -> AnalysisState:
     """舆情 Agent：通过 Function Calling 自主调用恐惧贪婪指数等工具 → 输出信号。"""
     symbol = state.get("symbol", "BTC-USDT")
     base = symbol.split("-")[0]
+    # as-of 回测模式：情绪数据按天粒度回溯，社交实时数据自动降级（客户端内处理）
+    as_of_ms = parse_as_of_ms(state.get("as_of"))
 
     user_prompt = (
         f"币种: {base}\n\n"
         "请调用可用工具获取市场情绪数据（恐惧贪婪指数 get_fear_greed、"
         "社交情绪 get_social_sentiment），基于反身性原则分析后输出 JSON 格式的情绪分析信号。"
     )
+
+    async def _tool_get_fear_greed(limit: int = 30) -> dict:
+        return await sentiment_client.get_fear_greed(limit=limit, before_ts=as_of_ms)
+
+    async def _tool_get_social_sentiment(symbol_arg: str) -> dict:
+        return await sentiment_client.get_social_sentiment(symbol_arg, before_ts=as_of_ms)
+
     async_tool_map = {
-        "get_fear_greed": sentiment_client.get_fear_greed,
-        "get_social_sentiment": sentiment_client.get_social_sentiment,
+        "get_fear_greed": _tool_get_fear_greed,
+        "get_social_sentiment": _tool_get_social_sentiment,
     }
 
     reasoning = ""
@@ -60,7 +70,7 @@ async def run_sentiment_agent(state: AnalysisState) -> AnalysisState:
         signal = parse_signal(fc.get("final_message", "{}"), "sentiment", base)
     except Exception as e:
         logger.warning("舆情 Agent Function Calling 失败，回退预取: %s", e)
-        fg_data = await sentiment_client.get_fear_greed(limit=30)
+        fg_data = await sentiment_client.get_fear_greed(limit=30, before_ts=as_of_ms)
         signal = _fallback_sentiment_signal(base, fg_data)
 
     signal["thinking"] = reasoning

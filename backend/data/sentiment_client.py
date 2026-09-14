@@ -3,6 +3,8 @@
 """
 
 import logging
+import time
+
 from backend.data.ssl_utils import make_client
 
 logger = logging.getLogger(__name__)
@@ -13,11 +15,13 @@ FNG_BASE = "https://api.alternative.me"
 class SentimentClient:
     """恐惧贪婪指数数据客户端（无状态：每次请求新建 AsyncClient，可在任意事件循环/子线程中安全调用）。"""
 
-    async def get_fear_greed(self, limit: int = 30) -> dict:
+    async def get_fear_greed(self, limit: int = 30, before_ts: int | None = None) -> dict:
         """获取恐惧贪婪指数历史数据。
 
         Args:
             limit: 获取天数
+            before_ts: as-of 回测模式毫秒时间戳。设置时只返回该时刻之前的历史
+                （按天粒度），杜绝未来泄漏。
         Returns:
             {
                 "current": {"value": 45, "classification": "Fear"},
@@ -27,10 +31,15 @@ class SentimentClient:
             }
         """
         try:
+            fetch_limit = limit
+            if before_ts is not None:
+                # 需要覆盖 as_of 到今天的天数 + limit + 余量
+                span_days = max(0, (time.time() * 1000 - before_ts) / 86_400_000)
+                fetch_limit = int(limit + span_days + 3)
             async with make_client(timeout=15.0) as http:
                 resp = await http.get(
                     f"{FNG_BASE}/fng/",
-                    params={"limit": limit},
+                    params={"limit": fetch_limit},
                 )
                 resp.raise_for_status()
                 data = resp.json()
@@ -42,11 +51,20 @@ class SentimentClient:
             history = []
             for item in items:
                 val = int(item["value"])
+                entry_ts = int(item["timestamp"])  # 秒（天粒度）
+                if before_ts is not None and entry_ts * 1000 > before_ts:
+                    continue
                 history.append({
                     "value": val,
                     "classification": item["value_classification"],
                     "timestamp": item["timestamp"],
                 })
+
+            if before_ts is not None:
+                history = history[:limit]
+
+            if not history:
+                return {"error": "as-of 时刻之前无可用历史情绪数据"}
 
             current = history[0]
             prev = history[-1] if len(history) > 1 else current
@@ -74,13 +92,19 @@ class SentimentClient:
             logger.warning("获取恐惧贪婪指数失败: %s", e)
             return {"error": str(e)}
 
-    async def get_social_sentiment(self, symbol: str) -> dict:
+    async def get_social_sentiment(self, symbol: str, before_ts: int | None = None) -> dict:
         """获取社交媒体情绪评分。
 
         BTC: Alternative.me 恐惧贪婪指数（全市场情绪）
         ETH: 恐惧贪婪指数 + CoinGecko 社区情绪分（双重交叉验证）
+
+        as-of 模式（before_ts）下跳过 CoinGecko 实时社区情绪（无法回溯），
+        仅使用可回溯的恐惧贪婪指数，避免未来数据泄漏。
         """
-        fg_data = await self.get_fear_greed(limit=7)
+        if before_ts is not None:
+            fg_data = await self.get_fear_greed(limit=7, before_ts=before_ts)
+        else:
+            fg_data = await self.get_fear_greed(limit=7)
         if "error" in fg_data:
             return {"symbol": symbol, "error": fg_data["error"]}
 
@@ -104,8 +128,9 @@ class SentimentClient:
             "data_quality": "real",
         }
 
-        # ETH 增补 CoinGecko 社区情绪（免费端点，无需 Key）
-        if symbol.upper() == "ETH":
+        # ETH 增补 CoinGecko 社区情绪（免费端点，无需 Key；实时数据不可回溯，
+        # as-of 模式下跳过）
+        if symbol.upper() == "ETH" and before_ts is None:
             cg = await self._get_coingecko_sentiment("ethereum")
             if cg and cg.get("sentiment_votes_up_pct") is not None:
                 # CoinGecko 情绪分 0-100（正向百分）

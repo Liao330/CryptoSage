@@ -80,15 +80,28 @@ class GateClient:
 
     # ── 资金费率 ──
 
-    async def get_funding_rate(self, symbol: str) -> dict:
-        """获取当前资金费率。"""
+    async def get_funding_rate(self, symbol: str, before_ts: int | None = None) -> dict:
+        """获取资金费率。before_ts 为 as-of 回测毫秒时间戳（取该时刻前最近一条）。"""
         pair = _pair(symbol)
         try:
             async with make_client(timeout=10.0) as http:
-                resp = await http.get(
-                    f"{GATE_BASE}/api/v4/futures/usdt/contract_stats",
-                    params={"contract": pair, "limit": 1},
-                )
+                if before_ts is not None:
+                    # as-of：取 as_of 前 48h 窗口的 contract_stats，取窗口内最后一条
+                    resp = await http.get(
+                        f"{GATE_BASE}/api/v4/futures/usdt/contract_stats",
+                        params={
+                            "contract": pair,
+                            "interval": "1h",
+                            "from": before_ts // 1000 - 172800,
+                            "to": before_ts // 1000,
+                            "limit": 100,
+                        },
+                    )
+                else:
+                    resp = await http.get(
+                        f"{GATE_BASE}/api/v4/futures/usdt/contract_stats",
+                        params={"contract": pair, "limit": 1},
+                    )
                 resp.raise_for_status()
                 data = resp.json()
         except Exception as e:
@@ -101,7 +114,19 @@ class GateClient:
             }
 
         if data and len(data) > 0:
-            item = data[0]
+            if before_ts is not None:
+                # as-of：过滤 time <= as_of 的记录，取时间最大的一条
+                valid = [d for d in data if int(d.get("time", 0)) * 1000 <= before_ts]
+                if not valid:
+                    return {
+                        "symbol": symbol,
+                        "error": "as-of 时刻之前无资金费率数据",
+                        "source": "gate",
+                        "data_quality": "degraded",
+                    }
+                item = max(valid, key=lambda d: int(d.get("time", 0)))
+            else:
+                item = data[0]
             rate = float(item.get("funding_rate", 0))
             return {
                 "symbol": symbol,
@@ -121,20 +146,26 @@ class GateClient:
 
     # ── 未平仓合约 (OI) ──
 
-    async def get_open_interest(self, symbol: str, limit: int = 30) -> dict:
+    async def get_open_interest(self, symbol: str, limit: int = 30, before_ts: int | None = None) -> dict:
         """从 contract_stats 历史数据提取未平仓合约量（OI）变化。
 
         实测 contract_stats 每条记录都带 open_interest / open_interest_usd 字段
         （币本位张数 + USD 名义价值），且该接口国内网络可正常访问，
         可作为 Binance openInterestHist 在国内不可达时的更精确备源
         （优于 CoinGecko 全市场聚合估算）。
+
+        before_ts 为 as-of 回测毫秒时间戳：窗口 [as_of - limit 小时, as_of]。
         """
         pair = _pair(symbol)
         try:
+            params: dict = {"contract": pair, "interval": "1h", "limit": min(limit, 100)}
+            if before_ts is not None:
+                params["from"] = before_ts // 1000 - min(limit, 100) * 3600 - 3600
+                params["to"] = before_ts // 1000
             async with make_client(timeout=10.0) as http:
                 resp = await http.get(
                     f"{GATE_BASE}/api/v4/futures/usdt/contract_stats",
-                    params={"contract": pair, "interval": "1h", "limit": min(limit, 100)},
+                    params=params,
                 )
                 resp.raise_for_status()
                 data = resp.json()
@@ -144,6 +175,11 @@ class GateClient:
 
         if not data:
             return {"symbol": symbol, "error": "无数据", "source": "gate"}
+
+        if before_ts is not None:
+            data = [d for d in data if int(d.get("time", 0)) * 1000 <= before_ts]
+            if not data:
+                return {"symbol": symbol, "error": "as-of 时刻之前无 OI 数据", "source": "gate"}
 
         current = float(data[-1].get("open_interest_usd", 0))
         prev = float(data[0].get("open_interest_usd", 0))

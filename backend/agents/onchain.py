@@ -8,6 +8,7 @@ from backend.agents.state import AnalysisState
 from backend.agents.fc_base import run_function_calling
 from backend.data.onchain_client import onchain_client
 from backend.tools.definitions import ONCHAIN_TOOLS
+from backend.utils.asof import UNAVAILABLE_HINT, parse_as_of_ms
 from backend.utils.json_utils import parse_signal
 
 logger = logging.getLogger(__name__)
@@ -47,11 +48,26 @@ async def run_onchain_agent(state: AnalysisState) -> AnalysisState:
         "请依次调用可用工具获取链上数据（鲸鱼大额转账 get_whale_flows、"
         "交易所净流入/流出 get_exchange_netflow、政府钱包向交易所入金核验 get_government_exchange_deposits），并核对 24 小时窗口和地址覆盖，综合分析后输出 JSON 格式的链上分析信号。"
     )
-    async_tool_map = {
-        "get_whale_flows": onchain_client.get_whale_flows,
-        "get_exchange_netflow": onchain_client.get_exchange_netflow,
-        "get_government_exchange_deposits": onchain_client.get_government_exchange_deposits,
-    }
+
+    # as-of 回测模式：链上大额转账扫描为实时数据（mempool/最新区块），不可回溯。
+    # 工具整体降级为"数据不可用"，绝不用当前链上数据冒充历史（杜绝未来泄漏）。
+    as_of_ms = parse_as_of_ms(state.get("as_of"))
+
+    async def _unavailable(*args, **kwargs) -> dict:
+        return {"error": UNAVAILABLE_HINT, "data_quality": "degraded"}
+
+    if as_of_ms is not None:
+        async_tool_map = {
+            "get_whale_flows": _unavailable,
+            "get_exchange_netflow": _unavailable,
+            "get_government_exchange_deposits": _unavailable,
+        }
+    else:
+        async_tool_map = {
+            "get_whale_flows": onchain_client.get_whale_flows,
+            "get_exchange_netflow": onchain_client.get_exchange_netflow,
+            "get_government_exchange_deposits": onchain_client.get_government_exchange_deposits,
+        }
 
     reasoning = ""
     tool_calls_log: list = []

@@ -22,6 +22,13 @@ def signal(agent, bias, score, confidence, quality="real"):
 
 
 class SynthesisCalibrationTests(unittest.TestCase):
+    def setUp(self):
+        # 校准逻辑的基线是五维框架；数据源开关（.env 的 ENABLE_MACRO_AGENT）
+        # 属于运行时部署配置，不应影响单元测试的确定性
+        self._macro_patcher = patch("backend.agents.synthesis._MACRO_ENABLED", True)
+        self._macro_patcher.start()
+        self.addCleanup(self._macro_patcher.stop)
+
     def test_mixed_low_confidence_evidence_keeps_bearish_direction(self):
         evidence = [
             signal("onchain", "neutral", 50, 0.25),

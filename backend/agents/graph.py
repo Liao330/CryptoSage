@@ -56,14 +56,16 @@ def _make_timed_node(name: str, fn):
 
     return wrapped
 
-# Agent 名 → 运行函数映射
+# Agent 名 → 运行函数映射（受数据源可用性开关控制：禁用的维度不出现在
+# 执行映射中，即使 Orchestrator 意外请求也会被跳过）
 AGENT_MAP = {
     "technical": run_technical_agent,
     "onchain": run_onchain_agent,
     "derivatives": run_derivatives_agent,
     "sentiment": run_sentiment_agent,
-    "macro": run_macro_agent,
 }
+if config.ENABLE_MACRO_AGENT:
+    AGENT_MAP["macro"] = run_macro_agent
 
 
 async def _run_agents_parallel(state: AnalysisState) -> AnalysisState:

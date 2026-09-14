@@ -237,6 +237,9 @@ SupportedBar = Literal["1m", "5m", "15m", "30m", "1H", "4H", "1D", "1W"]
 class AnalyzeRequest(BaseModel):
     symbol: SupportedSymbol = "BTC-USDT"
     query: str = Field(default="分析当前市场", min_length=1, max_length=2000)
+    # as-of 回测模式：把分析"时间旅行"到该历史时刻（ISO 8601）。
+    # 所有数据源只取该时刻之前的数据，不可回溯的源诚实降级，杜绝未来泄漏。
+    as_of: str | None = Field(default=None, max_length=40)
 
     @field_validator("query")
     @classmethod
@@ -244,6 +247,17 @@ class AnalyzeRequest(BaseModel):
         value = value.strip()
         if not value:
             raise ValueError("query 不能为空")
+        return value
+
+    @field_validator("as_of")
+    @classmethod
+    def validate_as_of(cls, value: str | None) -> str | None:
+        from backend.utils.asof import parse_as_of_ms
+
+        if value in (None, ""):
+            return None
+        if parse_as_of_ms(value) is None:
+            raise ValueError("as_of 必须是合法的 ISO 8601 时间字符串，如 2026-09-01T00:00:00Z")
         return value
 
 
@@ -267,7 +281,7 @@ async def start_analysis(req: AnalyzeRequest):
     task_id = uuid.uuid4().hex
     _ensure_task(task_id)
 
-    task = asyncio.create_task(_run_analysis(task_id, req.symbol, req.query))
+    task = asyncio.create_task(_run_analysis(task_id, req.symbol, req.query, as_of=req.as_of))
     task_handles[task_id] = task
 
     def _release_handle(done_task: asyncio.Task) -> None:
@@ -525,9 +539,10 @@ async def _push_to_frontend(task_id: str, msg_type: str, data: Any):
 
 # ── 分析执行 ──
 
-async def _run_analysis(task_id: str, symbol: str, query: str):
-    """后台执行完整的分析流程。"""
-    logger.info("[%s] 开始分析 %s: %s", task_id, symbol, query)
+async def _run_analysis(task_id: str, symbol: str, query: str, as_of: str | None = None):
+    """后台执行完整的分析流程。as_of 非 None 时为历史回测模式。"""
+    logger.info("[%s] 开始分析 %s: %s%s", task_id, symbol, query,
+                f"（as-of 回测: {as_of}）" if as_of else "")
     await _push_to_frontend(task_id, "agent_start", {"symbol": symbol, "query": query})
 
     started_at = datetime.now(timezone.utc)
@@ -535,6 +550,7 @@ async def _run_analysis(task_id: str, symbol: str, query: str):
     initial_state: dict = {
         "query": query,
         "symbol": symbol,
+        "as_of": as_of,
         "evidence_pool": [],
         "step": 0,
         "critic_round": 0,
@@ -618,7 +634,10 @@ async def _run_analysis(task_id: str, symbol: str, query: str):
             async for event in graph.astream(initial_state, stream_mode="values"):
                 await _emit_state(event)
 
-        _OVERALL_SAFETY_TIMEOUT = 1800.0  # 30 分钟兜底，仅防止真正挂死，不用于常规限速
+        # 兜底超时，仅防止真正挂死，不用于常规限速。走本地代理（如 CodeBuddy
+        # LLM Proxy）时慢思考调用显著变慢，可通过环境变量放宽。
+        import os as _os
+        _OVERALL_SAFETY_TIMEOUT = float(_os.getenv("OVERALL_SAFETY_TIMEOUT", "1800"))
 
         try:
             await asyncio.wait_for(_run_stream(), timeout=_OVERALL_SAFETY_TIMEOUT)
@@ -661,15 +680,24 @@ async def _run_analysis(task_id: str, symbol: str, query: str):
                 task_id, last_state, started_at, started_perf, final_event=True
             )
             result["execution_metrics"] = execution_metrics
-            result = _apply_execution_freshness_guard(result, execution_metrics)
-            await asyncio.gather(
+            if as_of:
+                # as-of 回测模式：标注分析基准时刻；新闻时效守卫与影子回测追踪
+                # 均基于"当前时间"结算，对历史回测无意义，跳过（由回测脚本自行判定结果）
+                result["as_of"] = as_of
+            else:
+                result = _apply_execution_freshness_guard(result, execution_metrics)
+            persist_tasks = [
                 save_analysis_history(
                     task_id, symbol, result, evidence_pool,
                     execution_trace=last_state.get("trace", []),
                     execution_metrics=execution_metrics,
                 ),
-                _create_backtest_track(task_id, symbol, result, evidence_pool),
-            )
+            ]
+            if not as_of:
+                persist_tasks.append(
+                    _create_backtest_track(task_id, symbol, result, evidence_pool)
+                )
+            await asyncio.gather(*persist_tasks)
             # 先完成历史/影子记录，再广播 final，保证前端完成态刷新监控时能读到本轮结果。
             await _push_to_frontend(task_id, "final", result)
             logger.info(

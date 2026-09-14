@@ -15,6 +15,10 @@ from backend.utils.json_utils import parse_json
 
 logger = logging.getLogger(__name__)
 
+# 宏观维度可用性开关：禁用时 Synthesis 的维度框架/权重矩阵/融合规则中
+# 完全不出现宏观概念（LLM 无感知，不会输出"无宏观输入"类降级表述）
+_MACRO_ENABLED = config.ENABLE_MACRO_AGENT
+
 _NEUTRAL_SIGNAL_BAND = 0.08
 # A single independent signal can be a useful forecast, but it should never
 # become an executable high-confidence trade by itself.
@@ -93,18 +97,16 @@ def _data_quality_factor(item: dict) -> float:
 
 SYSTEM_PROMPT = """你是一个加密货币市场多源信号融合专家（Synthesis）。
 
-你的任务是将来自多个分析维度（技术面、链上、衍生品、舆情、宏观/地缘）的信号进行加权融合，输出综合研判。
+你的任务是将来自多个分析维度（{dimension_list}）的信号进行加权融合，输出综合研判。
 
 【第一步：判定市场状态】
-先根据证据判定当前处于哪种市场状态，再据此选择权重档位（高/中/低）。四种状态与对应权重矩阵：
+先根据证据判定当前处于哪种市场状态，再据此选择权重档位（高/中/低）。{state_count}种状态与对应权重矩阵：
 
-| 市场状态 | 技术面 | 链上 | 衍生品 | 舆情 | 宏观/地缘 |
-|---------|-------|------|-------|------|----------|
-| 趋势市（各维度一致看多/空） | 高 | 中 | 中 | 低 | 低 |
-| 震荡市（无明确方向） | 低 | 高 | 中 | 中 | 低 |
-| 高波动/事件驱动 | 中 | 中 | 高 | 高（反向） | 高 |
-| 地缘危机（战争/黑天鹅） | 低 | 中 | 中 | 中 | 最高 |
-
+| 市场状态 | 技术面 | 链上 | 衍生品 | 舆情{macro_column_header}|
+|---------|-------|------|-------|------{macro_column_sep}|
+| 趋势市（各维度一致看多/空） | 高 | 中 | 中 | 低{macro_trend_weight} |
+| 震荡市（无明确方向） | 低 | 高 | 中 | 中{macro_range_weight} |
+| 高波动/事件驱动 | 中 | 中 | 高 | 高（反向）{macro_event_weight} |{geopolitical_row}
 【第二步：加权融合】
 综合分 = Σ(bias_score × weight × confidence)，据此输出方向倾向与置信度。
 
@@ -112,9 +114,8 @@ SYSTEM_PROMPT = """你是一个加密货币市场多源信号融合专家（Synt
 1. 多源共振才可信：单一信号不下结论，需要 ≥2 维度同向
 2. 权重不是简单地平均，要理解不同市场状态下的信号有效性差异
 3. 对各 Agent 的 confidence 做校准（某些 Agent 可能在当前状态下置信度虚高）
-4. 找出最可靠的关键价位（多重汇聚 > 单一来源）
-5. 地缘危机场景：宏观/地缘权重拉满，技术面在黑天鹅面前会失效，必须在 risk_assessment 明确提示"事件驱动行情，技术信号参考价值下降"
-6. 高波动/事件驱动时，极端舆情作为反向指标（极度贪婪→顶部信号，极度恐惧→底部信号）
+4. 找出最可靠的关键价位（多重汇聚 > 单一来源）{macro_rule}
+{last_rule_number}. 高波动/事件驱动时，极端舆情作为反向指标（极度贪婪→顶部信号，极度恐惧→底部信号）
 
 仓位建议规则（若启用）：
 - 置信度 < 0.6 → 观望（不建议开仓）
@@ -125,27 +126,27 @@ SYSTEM_PROMPT = """你是一个加密货币市场多源信号融合专家（Synt
 
 输出格式（严格 JSON）：
 ```json
-{
+{{
   "direction": "bullish",
   "confidence": 0.72,
   "key_findings": ["技术面多头排列 + 衍生品空头拥挤 = 看多共振"],
   "market_state": "趋势市",
-  "weighted_scores": {"technical": 0.35, "onchain": 0.2, "derivatives": 0.25, "sentiment": 0.1, "macro": 0.1},
-  "key_levels": {
-    "supports": [{"level": 60000, "confluence": 3, "reason": "前低+POC+EMA200汇聚"}],
-    "resistances": [{"level": 65000, "confluence": 2, "reason": "前高+布林上轨"}]
-  },
+  "weighted_scores": {{{weighted_scores_example}}},
+  "key_levels": {{
+    "supports": [{{"level": 60000, "confluence": 3, "reason": "前低+POC+EMA200汇聚"}}],
+    "resistances": [{{"level": 65000, "confluence": 2, "reason": "前高+布林上轨"}}]
+  }},
   "risk_assessment": "主要风险：成交量未放大，警惕假突破",
-  "position_advice": {
+  "position_advice": {{
     "action": "轻仓试探",
     "reason": "置信度0.72，止损位59800（距现价3.2%）",
     "stop_loss": 59800,
-    "take_profit": [{"level": 65000, "pct": 30, "reason": "前高阻力位，部分止盈"}],
+    "take_profit": [{{"level": 65000, "pct": 30, "reason": "前高阻力位，部分止盈"}}],
     "exit_conditions": ["MACD死叉确认", "价格跌破EMA50", "关联市场恐慌事件"],
     "position_lifecycle": "当前处于多头初期，建议分3批入场：50%现价+25%回调到EMA200+25%突破确认后加仓"
-  },
+  }},
   "analysis": "详细分析文本..."
-}
+}}
 ```
 
 【重要原则】
@@ -154,7 +155,29 @@ SYSTEM_PROMPT = """你是一个加密货币市场多源信号融合专家（Synt
 - black_swan_risks 为必填字段，至少列出以下四类常备尾部风险（即便当前无明确迹象也须注明监测边界）：
   交易所安全事件（如被盗/宕机）、监管政策突变、稳定币脱锚风险、大额代币解锁
 - confidence 反映了多源交叉验证后的综合把握度
-"""
+""".format(
+    dimension_list="技术面、链上、衍生品、舆情、宏观/地缘" if _MACRO_ENABLED else "技术面、链上、衍生品、舆情",
+    state_count="四" if _MACRO_ENABLED else "三",
+    macro_column_header=" | 宏观/地缘" if _MACRO_ENABLED else "",
+    macro_column_sep="----------" if _MACRO_ENABLED else "",
+    macro_trend_weight=" | 低" if _MACRO_ENABLED else "",
+    macro_range_weight=" | 低" if _MACRO_ENABLED else "",
+    macro_event_weight=" | 高" if _MACRO_ENABLED else "",
+    geopolitical_row=(
+        "\n| 地缘危机（战争/黑天鹅） | 低 | 中 | 中 | 中 | 最高 |" if _MACRO_ENABLED else ""
+    ),
+    macro_rule=(
+        "\n5. 地缘危机场景：宏观/地缘权重拉满，技术面在黑天鹅面前会失效，"
+        "必须在 risk_assessment 明确提示\"事件驱动行情，技术信号参考价值下降\""
+        if _MACRO_ENABLED else ""
+    ),
+    last_rule_number="6" if _MACRO_ENABLED else "5",
+    weighted_scores_example=(
+        '"technical": 0.35, "onchain": 0.2, "derivatives": 0.25, "sentiment": 0.1, "macro": 0.1'
+        if _MACRO_ENABLED
+        else '"technical": 0.35, "onchain": 0.25, "derivatives": 0.25, "sentiment": 0.15'
+    ),
+)
 
 
 async def run_synthesis(state: AnalysisState) -> AnalysisState:
@@ -399,10 +422,17 @@ def _effective_profile(
     profile: dict[str, float],
     weight_multipliers: dict[str, float] | None = None,
 ) -> dict[str, float]:
+    # 宏观维度禁用时剥离 macro 权重并归一化，让权重矩阵呈现为
+    # "天然四维框架"（无缺口、无可被推断的缺失维度）
+    base = {
+        agent: weight
+        for agent, weight in profile.items()
+        if _MACRO_ENABLED or agent != "macro"
+    }
     multipliers = weight_multipliers or {}
     adjusted = {
         agent: weight * max(0.70, min(1.30, _safe_float(multipliers.get(agent), 1.0)))
-        for agent, weight in profile.items()
+        for agent, weight in base.items()
     }
     total = sum(adjusted.values()) or 1.0
     return {agent: weight / total for agent, weight in adjusted.items()}
@@ -596,7 +626,11 @@ def _build_timeframe_outlook(
             ],
             "thesis": f"{context['label']}优先观察{context['focus']}；当前主导证据为{driver_text}。",
             "drivers": drivers,
-            "weight_profile": {agent: round(weight, 3) for agent, weight in effective_profile.items()},
+            "weight_profile": {
+                agent: round(weight, 3)
+                for agent, weight in effective_profile.items()
+                if _MACRO_ENABLED or agent != "macro"
+            },
         }
     return outlook
 
@@ -687,8 +721,19 @@ def _calibrate_synthesis_result(
         "dynamic_weight_multipliers": {
             agent: round(_safe_float(value, 1.0), 3)
             for agent, value in (weight_multipliers or {}).items()
+            if _MACRO_ENABLED or agent != "macro"
         },
     })
+    # 宏观禁用时过滤校准报告中的 macro 条目：该结果会整包进入 Critic 提示词，
+    # 保留 macro 条目会让 Critic 感知到"存在但零样本"的维度
+    if performance_report and not _MACRO_ENABLED:
+        filtered_report = dict(performance_report)
+        agents_section = filtered_report.get("agents")
+        if isinstance(agents_section, dict) and "macro" in agents_section:
+            filtered_report["agents"] = {
+                k: v for k, v in agents_section.items() if k != "macro"
+            }
+        performance_report = filtered_report
     result.update({
         "model_direction": model_direction,
         "model_confidence": model_confidence,
@@ -722,9 +767,11 @@ def _calibrate_synthesis_result(
     )
     if isinstance(macro_signal, dict) and macro_signal.get("news_event_graph"):
         result["news_event_graph"] = macro_signal["news_event_graph"]
-    else:
+    elif _MACRO_ENABLED:
         # 保持图谱入口稳定可见：没有宏观证据时也输出一个可审计的空图，
         # 前端据此明确展示“本窗口无经时效校验事件”，而不是静默隐藏能力。
+        # （宏观维度被禁用时不输出该字段——对下游 Critic/前端完全无感知，
+        #   避免"宏观 0 覆盖"类的降级批评）
         result["news_event_graph"] = {
             "article_count": 0,
             "event_count": 0,

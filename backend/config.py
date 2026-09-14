@@ -81,6 +81,14 @@ class Config:
     # 仓位建议开关
     ENABLE_POSITION_ADVICE: bool = os.getenv("ENABLE_POSITION_ADVICE", "true").lower() == "true"
 
+    # 数据源可用性开关：网络不可达的数据源直接禁用，让相关 Agent 完全无感知
+    # （不进系统提示词、不进工具表、不做"获取失败"降级标注），而不是反复
+    # 重试后带着"数据盲区"警告污染研判。
+    # ENABLE_MACRO_AGENT=false  : 禁用宏观/地缘 Agent（联网新闻搜索整条链路）
+    # ENABLE_OPTIONS_TOOL=false : 禁用 Deribit 期权工具（衍生品 Agent 保留费率/OI/爆仓）
+    ENABLE_MACRO_AGENT: bool = os.getenv("ENABLE_MACRO_AGENT", "true").lower() in ("1", "true", "yes")
+    ENABLE_OPTIONS_TOOL: bool = os.getenv("ENABLE_OPTIONS_TOOL", "true").lower() in ("1", "true", "yes")
+
     # Agent 控制参数（质量优先于速度：适当放宽轮次上限，仅作为防死循环兜底，
     # 不作为常规限速手段）
     MAX_ORCHESTRATOR_STEPS: int = int(os.getenv("MAX_ORCHESTRATOR_STEPS", "10"))

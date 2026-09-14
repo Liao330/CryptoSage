@@ -9,6 +9,7 @@ from backend.agents.fc_base import run_function_calling
 from backend.data.macro_client import macro_client
 from backend.data.news_graph import assess_government_event, build_news_event_graph
 from backend.tools.definitions import MACRO_TOOLS
+from backend.utils.asof import UNAVAILABLE_HINT, parse_as_of_ms
 from backend.utils.json_utils import parse_signal
 
 logger = logging.getLogger(__name__)
@@ -100,6 +101,29 @@ async def run_macro_agent(state: AnalysisState) -> AnalysisState:
     symbol = state.get("symbol", "BTC-USDT")
     base = symbol.split("-")[0]
     query = state.get("query", "分析当前宏观环境")
+
+    # as-of 回测模式：联网新闻检索为实时数据不可回溯，直接产出降级中性信号
+    # （不检索、绝不用"当前"新闻冒充历史——那会把未来泄漏进分析）
+    if parse_as_of_ms(state.get("as_of")) is not None:
+        signal = {
+            "agent": "macro",
+            "symbol": base,
+            "bias": "neutral",
+            "score": 50,
+            "confidence": 0.0,
+            "evidence": [],
+            "caveats": [UNAVAILABLE_HINT],
+            "analysis": "",
+            "data_source": "none",
+            "data_quality": "degraded",
+        }
+        state.setdefault("evidence_pool", []).append(signal)
+        state.setdefault("trace", []).append({
+            "node": "macro", "symbol": base, "signal_bias": "neutral",
+            "score": 50, "reasoning": "as-of 模式：新闻检索不可回溯，降级为中性",
+            "tool_calls": [],
+        })
+        return state
 
     focus_queries = PRIORITY_FOCUS_QUERIES + MANDATORY_MARKET_QUERIES + US_POLICY_FOCUS_QUERIES
     user_prompt = (

@@ -222,12 +222,16 @@ def _is_finite_number(value: object) -> bool:
 class DerivativesClient:
     """Binance 衍生品数据客户端（无状态：每次请求新建 client（含 certifi SSL 修复），可在任意事件循环/子线程中安全调用）。"""
 
-    async def get_funding_rate(self, symbol: str) -> dict:
-        """获取当前资金费率（Gate → Binance → CoinGecko fallback）。"""
+    async def get_funding_rate(self, symbol: str, before_ts: int | None = None) -> dict:
+        """获取资金费率（Gate → Binance → CoinGecko fallback）。
+
+        before_ts: as-of 回测毫秒时间戳。历史模式仅走可回溯的 Gate/Binance
+        历史端点；不可回溯的 CoinGecko 实时 fallback 直接跳过（杜绝未来泄漏）。
+        """
         symbol = _normalize_contract_symbol(symbol)
-        # 1. Gate.io
+        # 1. Gate.io（支持 as-of 历史窗口）
         try:
-            gate_result = await self._get_funding_rate_gate(symbol)
+            gate_result = await self._get_funding_rate_gate(symbol, before_ts=before_ts)
             if not gate_result.get("error") and gate_result.get("funding_rate") is not None:
                 return gate_result
             logger.warning("Gate 资金费率无有效数据: %s", gate_result.get("error", "未知错误"))
@@ -237,15 +241,24 @@ class DerivativesClient:
         # 2. Binance（国内网络偶发 TLS RECORD_LAYER_FAILURE，但给足超时优先尝试拿到真实数据，
         # 而非过早放弃切到精度更低的备源——分析质量优先于速度）
         try:
+            params: dict = {"symbol": symbol, "limit": 1}
+            if before_ts is not None:
+                # 历史资金费率：取 as_of 前 48h 内最近一条
+                params = {
+                    "symbol": symbol,
+                    "startTime": before_ts - 172_800_000,
+                    "endTime": before_ts,
+                    "limit": 10,
+                }
             async with make_client(timeout=20.0) as http:
                 resp = await http.get(
                     f"{BINANCE_FAPI}/fapi/v1/fundingRate",
-                    params={"symbol": symbol, "limit": 1},
+                    params=params,
                 )
                 resp.raise_for_status()
                 data = resp.json()
             if data and len(data) > 0:
-                item = data[0]
+                item = data[-1] if before_ts is not None else data[0]
                 rate = float(item["fundingRate"])
                 return {
                     "symbol": symbol,
@@ -259,11 +272,33 @@ class DerivativesClient:
         except Exception as e:
             logger.warning("Binance 资金费率失败: %s", e)
 
+        if before_ts is not None:
+            # as-of 模式：CoinGecko 实时估算不可回溯，不提供数据（诚实降级）
+            return {
+                "symbol": symbol,
+                "error": "as-of 模式下所有资金费率历史源不可用",
+                "source": "none",
+                "data_quality": "degraded",
+            }
+
         # 2. CoinGecko derivatives fallback
         return await self._get_funding_rate_coingecko(symbol)
 
-    async def get_options_snapshot(self, symbol: str) -> dict:
-        """获取 BTC/ETH 近月期权链，计算最大痛点与交割压力。Deribit 无需 API key。"""
+    async def get_options_snapshot(self, symbol: str, before_ts: int | None = None) -> dict:
+        """获取 BTC/ETH 近月期权链，计算最大痛点与交割压力。Deribit 无需 API key。
+
+        before_ts: as-of 回测模式 —— Deribit 实时期权链不可回溯，直接返回不可用
+        （绝不用当前期权数据冒充历史）。
+        """
+        if before_ts is not None:
+            return {
+                "symbol": symbol,
+                "data_quality": "degraded",
+                "error": "as-of 模式下期权数据不可回溯",
+                "bias": "neutral",
+                "score": 50,
+                "confidence": 0.0,
+            }
         currency = str(symbol).upper().replace("-", "")
         currency = currency.removesuffix("USDT").removesuffix("USDC").removesuffix("USD")
         if currency not in {"BTC", "ETH"}:
@@ -330,18 +365,33 @@ class DerivativesClient:
             "confidence": 0.0,
         }
 
-    async def _get_funding_rate_gate(self, symbol: str) -> dict:
-        """Gate.io 合约统计获取资金费率。"""
+    async def _get_funding_rate_gate(self, symbol: str, before_ts: int | None = None) -> dict:
+        """Gate.io 合约统计获取资金费率（支持 as-of 历史窗口）。"""
         pair = symbol.replace("USDT", "_USDT")
+        params: dict = {"contract": pair, "limit": 1}
+        if before_ts is not None:
+            params = {
+                "contract": pair,
+                "interval": "1h",
+                "from": before_ts // 1000 - 172800,
+                "to": before_ts // 1000,
+                "limit": 100,
+            }
         async with make_client(timeout=10.0) as http:
             resp = await http.get(
                 "https://api.gateio.ws/api/v4/futures/usdt/contract_stats",
-                params={"contract": pair, "limit": 1},
+                params=params,
             )
             resp.raise_for_status()
             data = resp.json()
         if data and len(data) > 0:
-            item = data[0]
+            if before_ts is not None:
+                valid = [d for d in data if int(d.get("time", 0)) * 1000 <= before_ts]
+                if not valid:
+                    return {"symbol": symbol, "error": "as-of 时刻之前无资金费率数据", "source": "gate"}
+                item = max(valid, key=lambda d: int(d.get("time", 0)))
+            else:
+                item = data[0]
             rate = float(item.get("funding_rate", 0))
             return {
                 "symbol": symbol,
@@ -400,7 +450,7 @@ class DerivativesClient:
         }
 
     async def get_open_interest(
-        self, symbol: str, period: str = "1H", limit: int = 30
+        self, symbol: str, period: str = "1H", limit: int = 30, before_ts: int | None = None
     ) -> dict:
         """获取 OI 历史数据（Gate → Binance → CoinGecko fallback）。
 
@@ -408,12 +458,14 @@ class DerivativesClient:
         （连接超时/TLS 握手失败，非临时抖动），此前把它排在首位导致 OI 长期
         走向精度较低的 CoinGecko 聚合估算兜底。改为 Gate.io contract_stats
         优先（国内可正常访问，且是逐合约精确数据），Binance 降级为备源。
+
+        before_ts: as-of 回测毫秒时间戳（仅可回溯源生效；CoinGecko 实时估算跳过）。
         """
         symbol = _normalize_contract_symbol(symbol)
 
-        # 1. Gate.io（国内可达，逐合约精确数据）
+        # 1. Gate.io（国内可达，逐合约精确数据，支持 as-of 窗口）
         try:
-            gate_res = await gate_client.get_open_interest(symbol, limit=limit)
+            gate_res = await gate_client.get_open_interest(symbol, limit=limit, before_ts=before_ts)
             if gate_res.get("current_oi") is not None and not gate_res.get("error"):
                 return gate_res
         except Exception as e:
@@ -421,10 +473,14 @@ class DerivativesClient:
 
         # 2. Binance 备源
         try:
+            params: dict = {"symbol": symbol, "period": period, "limit": limit}
+            if before_ts is not None:
+                params["startTime"] = before_ts - (limit + 1) * 3_600_000
+                params["endTime"] = before_ts
             async with make_client(timeout=20.0) as http:
                 resp = await http.get(
                     f"{BINANCE_FAPI}/futures/data/openInterestHist",
-                    params={"symbol": symbol, "period": period, "limit": limit},
+                    params=params,
                 )
                 resp.raise_for_status()
                 data = resp.json()
@@ -448,9 +504,17 @@ class DerivativesClient:
                 }
         except Exception as e:
             logger.warning("Binance OI 失败: %s，回退 CoinGecko", e)
+        if before_ts is not None:
+            # as-of 模式：CoinGecko 实时聚合估算不可回溯，诚实降级
+            return {
+                "symbol": symbol,
+                "error": "as-of 模式下所有 OI 历史源不可用",
+                "source": "none",
+                "data_quality": "degraded",
+            }
         return await self._get_oi_coingecko(symbol)
 
-    async def get_liquidations(self, symbol: str, limit: int = 100) -> dict:
+    async def get_liquidations(self, symbol: str, limit: int = 100, before_ts: int | None = None) -> dict:
         """获取近期强平订单数据，分析多空爆仓分布。
 
         数据源优先级（Binance allForceOrders 已被限制/国内不可达，故 Gate 优先）：
@@ -458,11 +522,18 @@ class DerivativesClient:
             2. Binance /fapi/v1/allForceOrders （备源）
         全部失败时如实返回 data_quality=degraded（不造假）。
 
-        Returns:
-            {"symbol": ..., "long_liquidation_value": ..., "short_liquidation_value": ...,
-             "liquidation_clusters": [...], "source": ...}
+        before_ts: as-of 回测模式 —— 爆仓订单流为实时数据不可回溯，直接降级
+        （绝不用当前爆仓数据冒充历史）。
         """
         symbol = _normalize_contract_symbol(symbol)
+        if before_ts is not None:
+            return {
+                "symbol": symbol,
+                "error": "as-of 模式下爆仓数据不可回溯",
+                "source": "none",
+                "data_quality": "degraded",
+                "liquidation_clusters": [],
+            }
 
         # 1. Gate.io 主源
         try:

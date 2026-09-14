@@ -8,7 +8,9 @@ class GraphExecutionTests(unittest.IsolatedAsyncioTestCase):
     async def test_async_timed_wrappers_execute_and_record_timings(self):
         async def orchestrator(state):
             if not state.get("evidence_pool"):
-                agents = ["technical", "onchain", "derivatives", "sentiment", "macro"]
+                # Agent 清单受数据源可用性开关控制（ENABLE_MACRO_AGENT 等），
+                # 测试按当前启用的 Agent 请求，保持与配置一致
+                agents = sorted(graph_module.AGENT_MAP)
                 action = "call_agents"
             else:
                 agents = []
@@ -65,7 +67,7 @@ class GraphExecutionTests(unittest.IsolatedAsyncioTestCase):
             async for state in graph.astream(initial, stream_mode="values"):
                 final = state
 
-        self.assertEqual(len(final["evidence_pool"]), 5)
+        self.assertEqual(len(final["evidence_pool"]), len(graph_module.AGENT_MAP))
         self.assertEqual(final["synthesis_result"]["direction"], "neutral")
         timing_nodes = {entry["node"] for entry in final["_execution_timings"]}
         self.assertTrue({"orchestrator", "run_agents", "synthesis", "critic"}.issubset(timing_nodes))

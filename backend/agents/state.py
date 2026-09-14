@@ -25,6 +25,7 @@ class AnalysisState(TypedDict, total=False):
     # 输入
     query: str
     symbol: str
+    as_of: str | None    # as-of 回测模式：分析所"回到"的历史时刻（ISO 8601）；None=实时
 
     # Loop 1: 证据池
     evidence_pool: list[dict]          # 各 Agent 产出的标准化信号

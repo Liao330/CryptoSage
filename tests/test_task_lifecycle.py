@@ -30,7 +30,7 @@ class TaskLifecycleTests(unittest.IsolatedAsyncioTestCase):
         started = asyncio.Event()
         blocker = asyncio.Event()
 
-        async def fake_analysis(*_args):
+        async def fake_analysis(*_args, **_kwargs):
             started.set()
             await blocker.wait()
 

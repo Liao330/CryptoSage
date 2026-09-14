@@ -5,6 +5,7 @@
 
 import json
 import logging
+import os
 import time
 from typing import Any
 
@@ -19,9 +20,11 @@ _FAILOVER_COOLDOWN = 120  # 秒，冷却期过后重试主 provider
 
 # ── Provider 工厂 ──
 
-# 单次请求超时：high 档 reasoning 实测常需 20-60s，给足 120s 余量，
-# 避免网络抖动时过早超时触发 failover/降级
-_REQUEST_TIMEOUT = 120.0
+# 单次请求超时：high 档 reasoning 实测常需 20-60s，给足余量，
+# 避免网络抖动时过早超时触发 failover/降级。
+# 走本地代理（如 CodeBuddy LLM Proxy）时慢思考调用可能超过 120s，
+# 可通过环境变量 LLM_REQUEST_TIMEOUT 放宽。
+_REQUEST_TIMEOUT = float(os.getenv("LLM_REQUEST_TIMEOUT", "120"))
 
 
 def _make_hy3():

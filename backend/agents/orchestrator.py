@@ -13,6 +13,24 @@ from backend.utils.json_utils import parse_json
 
 logger = logging.getLogger(__name__)
 
+# 可调用专家清单（受数据源可用性开关控制：被禁用的维度对 Orchestrator 完全不可见）
+AGENT_DESCRIPTIONS = {
+    "technical": "技术面分析（K线、MACD、RSI、布林带、关键价位）",
+    "onchain": "链上数据（鲸鱼动向、交易所净流入/流出）",
+    "derivatives": "衍生品数据（资金费率、OI、爆仓分布）",
+    "sentiment": "舆情情绪（恐惧贪婪指数、社交媒体情绪）",
+    "macro": "宏观/地缘政治（联网搜索新闻事件）",
+}
+if not config.ENABLE_MACRO_AGENT:
+    AGENT_DESCRIPTIONS.pop("macro", None)
+
+ALL_AGENTS = set(AGENT_DESCRIPTIONS)
+
+_AGENT_BULLET_LIST = "\n".join(
+    f"- {name}: {desc}" for name, desc in AGENT_DESCRIPTIONS.items()
+)
+_AGENT_NAMES_SLASH = "/".join(sorted(AGENT_DESCRIPTIONS))
+
 ORCHESTRATOR_SYSTEM = """你是一个加密货币市场分析系统的任务调度器（Orchestrator）。
 
 你的职责：
@@ -22,19 +40,15 @@ ORCHESTRATOR_SYSTEM = """你是一个加密货币市场分析系统的任务调�
 4. 决定是继续收集数据，还是进入综合研判阶段
 
 可调用的专家 Agent：
-- technical: 技术面分析（K线、MACD、RSI、布林带、关键价位）
-- onchain: 链上数据（鲸鱼动向、交易所净流入/流出）
-- derivatives: 衍生品数据（资金费率、OI、爆仓分布）
-- sentiment: 舆情情绪（恐惧贪婪指数、社交媒体情绪）
-- macro: 宏观/地缘政治（联网搜索新闻事件）
+{agent_bullet_list}
 
 决策规则：
-- 分析质量优先于速度：除非用户查询明确只关心单一维度，否则应尽量调用全部 5 个专家 Agent
-  （technical/onchain/derivatives/sentiment/macro）以获得最完整的证据覆盖，不要为了节省时间而遗漏维度
-- 首次查询：至少调用 technical + derivatives + sentiment + onchain + macro 全量基线
+- 分析质量优先于速度：除非用户查询明确只关心单一维度，否则应尽量调用全部 {agent_count} 个专家 Agent
+  （{agent_names_slash}）以获得最完整的证据覆盖，不要为了节省时间而遗漏维度
+- 首次查询：至少调用 {agent_names_slash} 全量基线
 - 如果证据不足：指定需要补充的 Agent
 - ⚠ 信号矛盾处理：若出现维度间矛盾（如 technical看多 vs derivatives看空），
-  优先调用未覆盖的 Agent 来破局（如 onchain/macro 作为 tie-breaker），而非直接进入合成
+  优先调用尚未覆盖的 Agent 来破局，而非直接进入合成
 - 如果各维度信号一致且置信度 ≥ {threshold}：进入 synthesis（综合研判）
 - 如果步数 ≥ {max_steps}：强制进入 synthesis
 - 注意错误标记 ⚠错误 的维度，其信号不应采信，需考虑重试或忽略
@@ -49,6 +63,9 @@ ORCHESTRATOR_SYSTEM = """你是一个加密货币市场分析系统的任务调�
   "contradiction": false  // 是否存在尚未解决的信号矛盾
 }}
 ```""".format(
+    agent_bullet_list=_AGENT_BULLET_LIST,
+    agent_count=len(AGENT_DESCRIPTIONS),
+    agent_names_slash=_AGENT_NAMES_SLASH,
     threshold=config.MIN_CONFIDENCE_THRESHOLD,
     max_steps=config.MAX_ORCHESTRATOR_STEPS,
 )
@@ -191,11 +208,8 @@ async def run_orchestrator(state: AnalysisState) -> AnalysisState:
     return state
 
 
-ALL_AGENTS = {"technical", "onchain", "derivatives", "sentiment", "macro"}
-
-
 def _is_evidence_sufficient(evidence: list[dict]) -> bool:
-    """判断证据是否充分：要求全部 5 个专家 Agent 均已产出证据（质量优先，
+    """判断证据是否充分：要求全部可用专家 Agent 均已产出证据（质量优先，
     不因部分维度提前一致就放弃尚未采集的维度），且共识明确（≥4 维同向）时早退；
     否则仍需 LLM 判定是否要补充调用或强制融合。
     """

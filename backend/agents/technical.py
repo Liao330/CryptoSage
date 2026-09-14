@@ -10,6 +10,7 @@ from backend.tools.definitions import TECHNICAL_TOOLS
 from backend.data.kline_repository import kline_repo
 from backend.indicators.ta import calc_all_indicators
 from backend.indicators.key_levels import calc_key_levels
+from backend.utils.asof import parse_as_of_ms
 from backend.utils.json_utils import parse_signal
 
 logger = logging.getLogger(__name__)
@@ -60,6 +61,8 @@ async def run_technical_agent(state: AnalysisState) -> AnalysisState:
     """
     symbol = state.get("symbol", "BTC-USDT")
     bar = "4H"
+    # as-of 回测模式：所有取数只允许 ts < as_of（杜绝未来泄漏）
+    as_of_ms = parse_as_of_ms(state.get("as_of"))
 
     def _with_provenance(payload: dict, rows: list[dict]) -> dict:
         sources = sorted({row.get("data_source", "unknown") for row in rows})
@@ -70,7 +73,7 @@ async def run_technical_agent(state: AnalysisState) -> AnalysisState:
 
     # ── FC 工具实现（async；在 fc_base 子线程内经 asyncio.run 调用，故依赖无状态的 kline_repo）──
     async def _tool_get_klines(symbol: str, bar: str = "4H", limit: int = 200) -> dict:
-        rows = await kline_repo.get_klines(symbol, bar, min(limit, 200))
+        rows = await kline_repo.get_klines(symbol, bar, min(limit, 200), before_ts=as_of_ms)
         if not rows:
             return {"error": "K线数据获取失败"}
         recent = rows[-30:]
@@ -85,13 +88,13 @@ async def run_technical_agent(state: AnalysisState) -> AnalysisState:
         }, rows)
 
     async def _tool_calc_indicators(symbol: str, bar: str = "4H") -> dict:
-        rows = await kline_repo.get_klines(symbol, bar, 200)
+        rows = await kline_repo.get_klines(symbol, bar, 200, before_ts=as_of_ms)
         if not rows:
             return {"error": "K线数据获取失败"}
         return _with_provenance(calc_all_indicators(rows), rows)
 
     async def _tool_calc_key_levels(symbol: str, bar: str = "4H") -> dict:
-        rows = await kline_repo.get_klines(symbol, bar, 200)
+        rows = await kline_repo.get_klines(symbol, bar, 200, before_ts=as_of_ms)
         if not rows:
             return {"error": "K线数据获取失败"}
         return _with_provenance(calc_key_levels(rows, bar=bar), rows)
@@ -127,7 +130,7 @@ async def run_technical_agent(state: AnalysisState) -> AnalysisState:
                     break
     except Exception as e:
         logger.warning("技术面 Agent Function Calling 失败，回退预取: %s", e)
-        rows = await kline_repo.get_klines(symbol, bar, 200)
+        rows = await kline_repo.get_klines(symbol, bar, 200, before_ts=as_of_ms)
         if not rows:
             return _set_error_signal(state, "technical", "K线数据获取失败")
         fallback_rows = rows
@@ -139,7 +142,7 @@ async def run_technical_agent(state: AnalysisState) -> AnalysisState:
     # 若 LLM 未调用 calc_key_levels（或结果异常），兜底重算，确保价位始终来自算法
     if algo_key_levels is None:
         try:
-            rows = await kline_repo.get_klines(symbol, bar, 200)
+            rows = await kline_repo.get_klines(symbol, bar, 200, before_ts=as_of_ms)
             algo_key_levels = calc_key_levels(rows, bar=bar) if rows else {}
             if rows:
                 fallback_rows = rows

@@ -89,12 +89,19 @@ class KlineRepository:
         return None
 
     async def get_klines(
-        self, symbol: str, bar: str, limit: int = 200
+        self, symbol: str, bar: str, limit: int = 200, before_ts: int | None = None
     ) -> list[dict]:
         """获取 K 线数据，多级 fallback：Gate.io → OKX → CoinGecko → 缓存。
 
         优先拉取实时数据，缓存仅作为最终兜底（不再因缓存命中而跳过实时拉取）。
+
+        Args:
+            before_ts: 毫秒时间戳（as-of 回测模式）。设置后只返回 ts < before_ts
+                的 K 线，全部数据源均按历史端点/因果过滤取数，杜绝未来泄漏。
         """
+        if before_ts is not None:
+            return await self._get_klines_asof(symbol, bar, limit, before_ts)
+
         okx_bar = BAR_MAP.get(bar, bar)
 
         # 1. Gate.io (主数据源，优先实时)
@@ -131,16 +138,57 @@ class KlineRepository:
 
         return []
 
+    async def _get_klines_asof(
+        self, symbol: str, bar: str, limit: int, before_ts: int
+    ) -> list[dict]:
+        """as-of 模式：只取 ts < before_ts 的历史 K 线。
+
+        1. OKX history-candles（after 参数返回早于该时间戳的记录，可分页）
+        2. Gate candlesticks（from/to 窗口）
+        3. 本地 SQLite 缓存因果过滤（ts < before_ts）
+        """
+        okx_bar = BAR_MAP.get(bar, bar)
+
+        try:
+            rows = await self._fetch_from_okx(symbol, okx_bar, limit, before_ts_ms=before_ts)
+            if rows:
+                await self._save_to_cache(rows)
+                return sorted(rows, key=lambda r: r["ts"])[-limit:]
+        except Exception as e:
+            logger.warning("OKX as-of K线失败: %s", e)
+
+        try:
+            rows = await self._fetch_from_gate(symbol, bar, limit, before_ts_ms=before_ts)
+            if rows:
+                await self._save_to_cache(rows)
+                return sorted(rows, key=lambda r: r["ts"])[-limit:]
+        except Exception as e:
+            logger.warning("Gate as-of K线失败: %s", e)
+
+        cached = await self._load_from_cache(
+            symbol, bar, limit, before_ts=before_ts
+        )
+        if cached:
+            return sorted(cached, key=lambda r: r["ts"])[-limit:]
+        return []
+
     async def _load_from_cache(
-        self, symbol: str, bar: str, limit: int
+        self, symbol: str, bar: str, limit: int, before_ts: int | None = None
     ) -> list[dict]:
         try:
             async with aiosqlite.connect(_db_path()) as db:
                 db.row_factory = aiosqlite.Row
-                cursor = await db.execute(
-                    "SELECT * FROM klines WHERE symbol=? AND bar=? ORDER BY ts DESC LIMIT ?",
-                    (symbol, bar, limit),
-                )
+                if before_ts is not None:
+                    cursor = await db.execute(
+                        "SELECT * FROM klines WHERE symbol=? AND bar=? AND ts<? "
+                        "ORDER BY ts DESC LIMIT ?",
+                        (symbol, bar, before_ts, limit),
+                    )
+                else:
+                    cursor = await db.execute(
+                        "SELECT * FROM klines WHERE symbol=? AND bar=? ORDER BY ts DESC LIMIT ?",
+                        (symbol, bar, limit),
+                    )
                 rows = await cursor.fetchall()
                 result = []
                 for row in rows:
@@ -180,11 +228,14 @@ class KlineRepository:
             logger.warning("缓存写入失败: %s", e)
 
     async def _fetch_from_okx(
-        self, symbol: str, bar: str, limit: int
+        self, symbol: str, bar: str, limit: int, before_ts_ms: int | None = None
     ) -> list[dict]:
-        """从 OKX 分页拉取 K 线数据。"""
+        """从 OKX 分页拉取 K 线数据。
+
+        before_ts_ms: as-of 模式起始游标（after 参数），只返回早于该时间戳的记录。
+        """
         all_klines = []
-        after = ""
+        after = str(before_ts_ms) if before_ts_ms is not None else ""
         remaining = limit
 
         # 无状态：每次拉取新建 client（含 certifi SSL 修复），用完即释放
@@ -212,6 +263,9 @@ class KlineRepository:
                     break
 
                 for c in candles:
+                    ts = int(c[0])
+                    if before_ts_ms is not None and ts >= before_ts_ms:
+                        continue
                     all_klines.append({
                         "symbol": symbol,
                         "bar": bar,
@@ -265,15 +319,20 @@ class KlineRepository:
 
 
     async def _fetch_from_gate(
-        self, symbol: str, bar: str, limit: int
+        self, symbol: str, bar: str, limit: int, before_ts_ms: int | None = None
     ) -> list[dict]:
-        """从 Gate.io 获取 K 线（主数据源）。"""
+        """从 Gate.io 获取 K 线（主数据源）。before_ts_ms 为 as-of 模式窗口上界。"""
         pair = symbol.replace("-", "_")
         gate_bar = GATE_BAR_MAP.get(bar, bar.lower())
+        params: dict = {"currency_pair": pair, "interval": gate_bar, "limit": min(limit, 1000)}
+        if before_ts_ms is not None:
+            bucket_s = BAR_SECONDS.get(bar, BAR_SECONDS["4H"])
+            params["to"] = before_ts_ms // 1000
+            params["from"] = before_ts_ms // 1000 - int(limit * bucket_s * 1.5) - bucket_s
         async with make_client(timeout=15.0) as http:
             resp = await http.get(
                 "https://api.gateio.ws/api/v4/spot/candlesticks",
-                params={"currency_pair": pair, "interval": gate_bar, "limit": min(limit, 1000)},
+                params=params,
             )
             resp.raise_for_status()
             candles = resp.json()
@@ -293,6 +352,8 @@ class KlineRepository:
                 "data_source": "gate",
                 "data_quality": "real",
             })
+        if before_ts_ms is not None:
+            result = [r for r in result if r["ts"] < before_ts_ms]
         return result[-limit:] if len(result) > limit else result
 
 
